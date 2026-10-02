@@ -65,13 +65,80 @@ export async function fetchLiveCarparkData(
   currentCarparks: Carpark[],
   config: ApiKeyConfig
 ): Promise<LiveFetchResult> {
-  // If user enabled custom API or hybrid mode, try live Data.gov.sg
-  let liveUpdatedCount = 0;
   const now = new Date();
+  let liveUpdatedCount = 0;
 
+  // 1. Primary: Try serverless endpoint /api/carparkavailability (LTA DataMall)
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500);
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+    };
+    if (config.ltaDatamallKey) {
+      headers['AccountKey'] = config.ltaDatamallKey;
+    }
+
+    const ltaRes = await fetch('/api/carparkavailability', {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (ltaRes.ok) {
+      const result = await ltaRes.json();
+      if (result.status === 'success' && Array.isArray(result.data) && result.data.length > 0) {
+        // Map LTA data by development name or carpark ID
+        const ltaMap = new Map<string, number>();
+        for (const item of result.data) {
+          if (item.carparkId) {
+            ltaMap.set(String(item.carparkId).toUpperCase(), item.availableLots);
+          }
+          if (item.development) {
+            ltaMap.set(String(item.development).toLowerCase().trim(), item.availableLots);
+          }
+        }
+
+        const updated = currentCarparks.map((cp) => {
+          const matchLots =
+            ltaMap.get(cp.carparkNo.toUpperCase()) ??
+            ltaMap.get(cp.name.toLowerCase().trim());
+
+          if (matchLots !== undefined) {
+            liveUpdatedCount++;
+            return {
+              ...cp,
+              lots: {
+                ...cp.lots,
+                cars: {
+                  ...cp.lots.cars,
+                  available: matchLots,
+                },
+              },
+              lastUpdated: 'Just now (LTA DataMall)',
+            };
+          }
+          return cp;
+        });
+
+        return {
+          carparks: updated,
+          dataSource: 'live_api',
+          lastFetchTime: now,
+          apiStatusMessage: `Connected to LTA DataMall · ${result.count} carparks synced`,
+        };
+      }
+    }
+  } catch (err) {
+    // Continue to fallback
+  }
+
+  // 2. Secondary: Fallback to Data.gov.sg
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
 
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -128,12 +195,12 @@ export async function fetchLiveCarparkData(
           carparks: updated,
           dataSource: 'live_api',
           lastFetchTime: now,
-          apiStatusMessage: `Connected to Data.gov.sg · Live sync (${liveUpdatedCount} matching carparks updated)`,
+          apiStatusMessage: `Connected to Data.gov.sg · Live sync (${liveUpdatedCount} carparks updated)`,
         };
       }
     }
   } catch (err) {
-    // Graceful fallback to real-time high-fidelity dataset with organic fluctuation
+    // Graceful fallback
   }
 
   // Graceful simulation: subtle realistic fluctuations simulating SG drivers arriving/leaving
